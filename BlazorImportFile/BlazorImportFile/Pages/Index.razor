@@ -1,0 +1,197 @@
+﻿@page "/"
+@using BlazorImportFile.Models
+@using CsvHelper
+@using Services
+@using Models
+@using System.Globalization
+@inject IWebHostEnvironment Environment
+@inject IImportService ImportService
+@inject HttpClient Http
+
+<PageTitle>Import</PageTitle>
+
+<div class="container">
+    <div class="row">
+        <div class="col-md-12">
+            <div class="card">
+                <div class="card-header">
+                    <span>Please Select File of this format and size;
+                    @foreach (var item in AcceptedFileTypes)
+                    {
+                        <span class="badge bg-success m-1">@item</span>
+                    }
+                    </span>
+                    <span class="badge bg-success">File Size : @AcceptedMaxFileSize Bytes</span>
+                </div>
+                <div class="card-body">
+                    <InputFile OnChange="@HandelFileChange" class="form-control" aria-label="Select File"></InputFile>
+                    @if (SelectedFileNotification)
+                    {
+                            <div class="@AlertCssClass" role="alert">
+                            @foreach (var item in SelectedFileDetails)
+                            {
+                                     <p>@item</p>  
+                            }
+                            </div>
+                    }
+                    @if (ShowUploadBtn)
+                    {
+                        <button @onclick="@(async () => await HandelUpload())" class="btn btn-success">Upload SelectedFile</button>
+                    }
+
+                </div>
+            </div>
+            <div class="card">
+                <div class="card-header">
+                    <h3>Upload Files Table</h3>
+                </div>
+                <div class="card-body">
+                    <table class="table table-bordered">
+                        <thead>
+                            <tr>
+                                <th>#</th>
+                                <th>Id</th>
+                                <th>Payment</th>
+                                <th>Status</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var item in listOfImport)
+                            {
+                                <tr>
+                                    <td>@item.Id</td>
+                                    <td>@item.InvoiceId</td>
+                                    <td>@item.Price @item.CurrencyCode</td>
+                                    <td>@item.Status</td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+        
+    </div>
+</div>
+
+@code {
+    bool SelectedFileNotification = false;
+    bool ShowUploadBtn = false;
+    int AcceptedMaxFileSize = 1000000;
+    List<string> AcceptedFileTypes = new List<string> { "text/csv", "text/xml" };
+    List<string> SelectedFileDetails = new List<string>();
+    string NewFileName = string.Empty;
+    string AlertCssClass = string.Empty;
+    string fname = string.Empty;
+    string FileExtension = string.Empty;
+
+    IBrowserFile UploadedFile;
+    string PathToUpload = string.Empty;
+
+    List<Import> listOfImport = new List<Import>();
+
+    private async Task HandelFileChange(InputFileChangeEventArgs e)
+    {
+
+        fileValidation(e);
+
+    }
+
+    private void fileValidation(InputFileChangeEventArgs e)
+    {
+        UploadedFile = e.File;
+        var selectedFileType = UploadedFile.ContentType;
+        SelectedFileNotification = false;
+        SelectedFileDetails = new List<string>();
+
+        if (!AcceptedFileTypes.Any(t => t.Equals(selectedFileType)))
+        {
+            AlertCssClass = "alert alert-danger";
+            SelectedFileDetails.Add("File Type is not Acceptable!");
+            SelectedFileNotification = true;
+            ShowUploadBtn = false;
+            return;
+        }
+
+        var selectedFileSize = UploadedFile.Size;
+        if (selectedFileSize > AcceptedMaxFileSize)
+        {
+            AlertCssClass = "alert alert-danger";
+            SelectedFileDetails.Add($"the selected file size is larger than the allowed value {AcceptedMaxFileSize}");
+            SelectedFileNotification = true;
+            ShowUploadBtn = false;
+            return;
+        }
+
+        FileExtension = Path.GetExtension(UploadedFile.Name);
+        NewFileName = Guid.NewGuid().ToString() + FileExtension;
+
+        PathToUpload = Path.Combine(Environment.WebRootPath, "Uploads", NewFileName);
+
+        SelectedFileNotification = true;
+        ShowUploadBtn = true;
+        AlertCssClass = "alert alert-success";
+        SelectedFileDetails.Add("File Size : " + selectedFileSize.ToString());
+        SelectedFileDetails.Add("File Type : " + selectedFileType);
+        SelectedFileDetails.Add("New File Name : " + NewFileName);
+    }
+
+    private async Task HandelUpload(){
+        await using FileStream fs = new(PathToUpload, FileMode.Create);
+        await UploadedFile.OpenReadStream(AcceptedMaxFileSize).CopyToAsync(fs);
+
+        if (FileExtension == "csv")
+        {
+            var path = $"{Directory.GetCurrentDirectory()}{@"\wwwroot\Uploads"}" + "\\" + NewFileName;
+            using (var reader = new StreamReader(path))
+            using (var csv = new CsvReader(reader, CultureInfo.InvariantCulture))
+            {
+                csv.Read();
+                csv.ReadHeader();
+                while (csv.Read())
+                {
+                    var import = csv.GetRecord<Import>();
+                    await ImportService.AddNewImport(import);
+                }
+            }
+        }else if(FileExtension == "xml"){
+            //string xmlfilepath = Path.Combine(Directory.GetCurrentDirectory(), "XMLFile", ".xml");
+            string xmlstring = System.IO.File.ReadAllText(PathToUpload);
+            var stringReader = new StringReader(xmlstring);
+            var dsSet = new System.Data.DataSet();
+
+            dsSet.ReadXml(stringReader);
+            for(int i=0; i<dsSet.Tables[0].Rows.Count; i++)
+            {
+                Import import = new Import()
+                    {
+                        InvoiceId = dsSet.Tables[0].Rows[i][0].ToString(),
+                        Price = Convert.ToInt32(dsSet.Tables[0].Rows[i][2]),
+                        CurrencyCode = dsSet.Tables[0].Rows[i][3].ToString(),
+                        Date = dsSet.Tables[0].Rows[i][1].ToString(),
+                        Status = dsSet.Tables[0].Rows[i][4].ToString()
+                };
+                await ImportService.AddNewImport(import);
+            }
+        }
+
+        SelectedFileDetails = new List<string>();
+        SelectedFileDetails.Add("The File Uploaded Successfully");
+        SelectedFileNotification = true;
+        ShowUploadBtn = false;
+        AlertCssClass = "alert alert-success";
+
+        await LoadFilesToTable();
+    }
+
+
+    private async Task LoadFilesToTable(){
+        listOfImport = await ImportService.GetAllImport();
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadFilesToTable();
+    }
+    
+}
